@@ -13,7 +13,7 @@ MEMANTO_SENTINEL_END = "<!-- /MEMANTO-MANAGED-SECTION -->"
 MEMANTO_DYNAMIC_SENTINEL = "<!-- MEMANTO-DYNAMIC-MEMORIES -->"
 MEMANTO_DYNAMIC_SENTINEL_END = "<!-- /MEMANTO-DYNAMIC-MEMORIES -->"
 
-TEMPLATE_VERSION = "1.0.1"
+TEMPLATE_VERSION = "1.0.2"
 MEMANTO_VERSION_TAG = f"<!-- memanto-template-version: {TEMPLATE_VERSION} -->"
 
 
@@ -195,16 +195,16 @@ def _base_instruction_content(
 Every memory operation in this session goes through MEMANTO. There is no exception. All memanto commands are **shell commands**. Always run them using {tool_phrase}. Never simulate, describe, or "pretend to call" them.{note_line}
 
 ### 1. ENVIRONMENT-AWARE EXECUTION PROTOCOL (MANDATORY FIRST STEP)
-Before you write any code or provide a final answer, you MUST evaluate if you need to RECALL context or REMEMBER new information. You will do this by generating a `<thinking>` block before taking any other action.
+Before you write any code or provide a final answer, you MUST evaluate if you need to RECALL context or REMEMBER new information. You will do this by generating a `<scratchpad>` block before taking any other action.
 
-**How to Generate Your `<thinking>` Block:**
-- **Native CLI & Web Environments (Claude Code, Cursor, Windsurf, etc.):**
-    Write your `<thinking>` block directly at the start of your text response. If you identify a FRESH SESSION (Trigger 1), your very next action MUST be to execute `memanto memory sync` and `memanto recall`.
-- **VS Code Agent Environments (VS Code Copilot or VS Code Extension Agent Mode):**
-    Because you are required to use tools before responding with text, you will generate your `<thinking>` block via a silent tool call.
-    - **Step 1:** Invoke {tool_phrase} with the dummy command `echo "memory check"`.
-    - **Step 2:** Write your step-by-step evaluation of the triggers inside a `<thinking>` XML tag and place it entirely within the tool call's `explanation` parameter.
-    - **Step 3:** If you found matching triggers (like SYNC or RECALL), execute those memory operations in your very next tool calls before proceeding with the user's request.
+**How to Generate Your `<scratchpad>` Block (Silent Evaluation):**
+You MUST hide your evaluation inside a tool call. Do not output it as normal chat text.
+
+- **Step 1:** Invoke {tool_phrase} to execute your next command (or use a dummy command like `echo "memory check"`).
+- **Step 2:** Place your step-by-step `<scratchpad>` evaluation inside the tool call.
+  - *If you are running in Claude Code:* Format the `<scratchpad>` block as Bash shell comments (`# <scratchpad>...`) directly above the command.
+  - *Otherwise:* Place the `<scratchpad>` XML block entirely within the tool call's `explanation` (or equivalent reasoning) parameter.
+- **Step 3:** If you find matching triggers (SYNC or RECALL), execute those memory operations immediately before responding to the user. If you identify a FRESH SESSION (Trigger 1), your very next action MUST be to execute `memanto memory sync` and `memanto recall`.
 
 You must actively evaluate:
 1. SYNC (FRESH SESSION / CONTEXT REFRESH): Is this the very first turn of a new session or a shift to a new task?

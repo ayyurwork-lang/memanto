@@ -64,6 +64,114 @@ _KEY_TAG_PREFIX = "lg:key:"
 _ENCODED_KEY_TAG_PREFIX = "lg:key:v1:"
 _RESERVED_PREFIX = "lg:"
 
+# Namespace -> Memanto agent id encoding (see ``_namespace_to_agent_id``).
+_DEFAULT_AGENT_PREFIX = "langgraph_"
+# Agent id used for the empty namespace ``()`` (historical name, kept so stores
+# created by earlier versions stay addressable).
+_EMPTY_NAMESPACE_ID = "default"
+# Every non-empty namespace is encoded with this marker first, which keeps the
+# encoded ids disjoint from both the historical flat ids and the empty one.
+_NAMESPACE_ESCAPE_MARKER = "-"
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+
+
+def _encode_component(component: str) -> str:
+    """Encode one namespace component so it never contains a raw ``-``.
+
+    Alphanumeric ASCII passes through; everything else (``_``, ``-``, spaces,
+    accented characters, ...) becomes ``_`` + two hex digits per UTF-8 byte.
+    The escaping is what makes the whole mapping reversible: any ``_`` in an
+    encoded component starts an escape, and ``-`` is reserved as the component
+    separator.
+    """
+    encoded: list[str] = []
+    for char in component:
+        if char.isascii() and char.isalnum():
+            encoded.append(char)
+        else:
+            encoded.extend(f"_{byte:02x}" for byte in char.encode("utf-8"))
+    return "".join(encoded)
+
+
+def _decode_component(component: str) -> str | None:
+    """Inverse of :func:`_encode_component`, or ``None`` when malformed."""
+    raw = bytearray()
+    index = 0
+    while index < len(component):
+        char = component[index]
+        if char == "_":
+            hex_pair = component[index + 1 : index + 3]
+            if len(hex_pair) != 2 or not set(hex_pair) <= _HEX_DIGITS:
+                return None
+            raw.extend(bytes.fromhex(hex_pair))
+            index += 3
+        else:
+            raw.extend(char.encode("utf-8"))
+            index += 1
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def _namespace_to_agent_id(
+    namespace: tuple[str, ...], prefix: str = _DEFAULT_AGENT_PREFIX
+) -> str:
+    """Map a LangGraph namespace to its Memanto agent id, injectively.
+
+    Two different namespaces must never share an agent: an agent *is* the
+    memory scope here, so a collision means one namespace can recall and
+    overwrite another namespace's memories. Joining the components with ``_``
+    is lossy -- ``("my", "ns")`` and ``("my_ns",)`` both produced
+    ``langgraph_my_ns`` -- so instead:
+
+    * ``()`` keeps the historical ``langgraph_default`` id;
+    * a single alphanumeric component keeps its historical id (an all-alnum id
+      can never be produced by the encoded form below, which always contains
+      ``-`` or ``_``);
+    * everything else is encoded as ``-`` + escaped components joined by ``-``.
+    """
+    if not namespace:
+        return f"{prefix}{_EMPTY_NAMESPACE_ID}"
+    if len(namespace) == 1:
+        only = namespace[0]
+        if (
+            only.isascii()
+            and only.isalnum()
+            and only != _EMPTY_NAMESPACE_ID
+        ):
+            return f"{prefix}{only}"
+    joined = _NAMESPACE_ESCAPE_MARKER.join(
+        _encode_component(component) for component in namespace
+    )
+    return f"{prefix}{_NAMESPACE_ESCAPE_MARKER}{joined}"
+
+
+def _agent_id_to_namespace(
+    agent_id: str, prefix: str = _DEFAULT_AGENT_PREFIX
+) -> tuple[str, ...] | None:
+    """Inverse of :func:`_namespace_to_agent_id`; ``None`` when not ours.
+
+    Ids written by the previous lossy mapping (``langgraph_my_ns``) do not carry
+    the escape marker and are decoded the old way -- ``split("_\")`` -- so
+    namespaces created before this fix keep showing up in ``list_namespaces``.
+    """
+    if not agent_id.startswith(prefix):
+        return None
+    suffix = agent_id[len(prefix) :]
+    if suffix == _EMPTY_NAMESPACE_ID:
+        return ()
+    if suffix.startswith(_NAMESPACE_ESCAPE_MARKER):
+        encoded = suffix[len(_NAMESPACE_ESCAPE_MARKER) :]
+        components = [
+            _decode_component(part) for part in encoded.split(_NAMESPACE_ESCAPE_MARKER)
+        ]
+        if any(component is None for component in components):
+            return None
+        return tuple(components)  # type: ignore[arg-type]
+    # Legacy id from the previous, lossy mapping.
+    return tuple(suffix.split("_"))
+
 _VALID_MEMORY_TYPES = {
     "fact",
     "preference",
@@ -114,8 +222,7 @@ class MemantoStore(BaseStore):
         self._search_cache: dict[tuple, tuple[float, list[SearchItem]]] = {}
 
     def _ensure_client(self, namespace: tuple[str, ...]) -> tuple[SdkClient, str]:
-        ns_str = "_".join(namespace) or "default"
-        agent_id = f"{self._agent_prefix}{ns_str}"
+        agent_id = _namespace_to_agent_id(namespace, self._agent_prefix)
         with self._lock:
             if agent_id in self._client_pool:
                 return self._client_pool[agent_id], agent_id
@@ -427,12 +534,9 @@ class MemantoStore(BaseStore):
             agent_id = agent.get("agent_id") or agent.get("id") or ""
             if not isinstance(agent_id, str):
                 continue
-            if agent_id.startswith(self._agent_prefix):
-                ns_str = agent_id[len(self._agent_prefix) :]
-                if ns_str == "default":
-                    namespaces.append(())
-                else:
-                    namespaces.append(tuple(ns_str.split("_")))
+            namespace = _agent_id_to_namespace(agent_id, self._agent_prefix)
+            if namespace is not None:
+                namespaces.append(namespace)
 
         if op.match_conditions:
             for cond in op.match_conditions:

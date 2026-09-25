@@ -67,6 +67,43 @@ def test_namespace_agent_id_round_trip():
         assert _agent_id_to_namespace(_namespace_to_agent_id(namespace)) == namespace
 
 
+def test_agent_ids_never_start_with_a_dash():
+    """A leading ``-`` would be parsed as an option by the Memanto CLI."""
+    for namespace in [
+        (),
+        ("-a",),
+        ("", "-b"),
+        ("-a", "-b"),
+        ("a-b",),
+        ("--",),
+    ]:
+        agent_id = _namespace_to_agent_id(namespace)
+        assert not agent_id.split("langgraph_", 1)[1].startswith("-"), agent_id
+
+
+def test_reserved_default_component_is_escaped():
+    """``("default",)`` and ``()`` must not end up on the same agent."""
+    empty = _namespace_to_agent_id(())
+    reserved = _namespace_to_agent_id(("default",))
+
+    assert empty == "langgraph_default"
+    assert reserved != empty
+    assert _agent_id_to_namespace(reserved) == ("default",)
+
+
+def test_empty_component_round_trips():
+    for namespace in [("",), ("a", ""), ("", "b"), ("", ""), ("a", "", "b")]:
+        assert _agent_id_to_namespace(_namespace_to_agent_id(namespace)) == namespace
+
+
+def test_legacy_ids_still_decode():
+    """Ids written by the previous mapping keep their historical namespace."""
+    assert _agent_id_to_namespace("langgraph_my_ns") == ("my", "ns")
+    assert _agent_id_to_namespace("langgraph_alice") == ("alice",)
+    assert _agent_id_to_namespace("langgraph_default") == ()
+    assert _agent_id_to_namespace("unrelated_agent") is None
+
+
 def test_namespace_ids_stay_within_memanto_charset():
     """Agent ids must satisfy the charset Memanto validates server-side."""
     import re as _re
@@ -128,14 +165,14 @@ def test_ensure_client_creates_and_activates(mock_sdk_client):
     namespace = ("test", "ns")
     client, agent_id = store._ensure_client(namespace)
 
-    assert agent_id == "langgraph_-test-ns"
+    assert agent_id == "langgraph_test-ns"
     assert client == client_instance
 
     mock_sdk_client.assert_called_once_with(api_key="test_key")
     client_instance.create_agent.assert_called_once_with(
-        agent_id="langgraph_-test-ns", pattern="tool"
+        agent_id="langgraph_test-ns", pattern="tool"
     )
-    client_instance.activate_agent.assert_called_once_with(agent_id="langgraph_-test-ns")
+    client_instance.activate_agent.assert_called_once_with(agent_id="langgraph_test-ns")
 
     # Second call should return cached client
     client2, agent_id2 = store._ensure_client(namespace)
@@ -185,7 +222,7 @@ def test_do_get_recent_success(mock_sdk_client):
     assert item.value["kind"] == "fact"
 
     client_instance.recall_recent.assert_called_once_with(
-        agent_id="langgraph_-my_5fns", limit=100
+        agent_id="langgraph_my_5fns", limit=100
     )
 
 
@@ -247,7 +284,7 @@ def test_do_get_fallback_success(mock_sdk_client):
     assert item is not None
     assert item.value["content"] == "fallback content"
     client_instance.recall.assert_called_once_with(
-        agent_id="langgraph_-my_5fns", query="my_key", limit=100, tags=["lg:key:my_key"]
+        agent_id="langgraph_my_5fns", query="my_key", limit=100, tags=["lg:key:my_key"]
     )
 
 
@@ -280,7 +317,7 @@ def test_do_put_success(mock_sdk_client):
     store._do_put(op)
 
     client_instance.remember.assert_called_once_with(
-        agent_id="langgraph_-my_5fns",
+        agent_id="langgraph_my_5fns",
         memory_type="fact",
         title="fact title",
         content="my new fact",
@@ -348,7 +385,7 @@ def test_do_put_stringifies_non_string_content(mock_sdk_client):
     store._do_put(op)
 
     client_instance.remember.assert_called_once_with(
-        agent_id="langgraph_-my_5fns",
+        agent_id="langgraph_my_5fns",
         memory_type=None,
         title="42",
         content="42",
@@ -392,7 +429,7 @@ def test_do_search_recent(mock_sdk_client):
     assert len(items) == 1
     assert items[0].key == "key1"
     client_instance.recall_recent.assert_called_once_with(
-        agent_id="langgraph_-my_5fns", limit=100, type=None
+        agent_id="langgraph_my_5fns", limit=100, type=None
     )
 
 
@@ -424,7 +461,7 @@ def test_do_search_wildcard_with_tags_uses_backend_tag_filter(mock_sdk_client):
     assert items[0].key == "key3"
     client_instance.recall_recent.assert_not_called()
     client_instance.recall.assert_called_once_with(
-        agent_id="langgraph_-my_5fns",
+        agent_id="langgraph_my_5fns",
         query="*",
         limit=10,
         type=None,
@@ -457,7 +494,7 @@ def test_do_search_semantic(mock_sdk_client):
     assert len(items) == 1
     assert items[0].key == "key2"
     client_instance.recall.assert_called_once_with(
-        agent_id="langgraph_-my_5fns",
+        agent_id="langgraph_my_5fns",
         query="test query",
         limit=10,
         type=["observation"],
@@ -502,7 +539,7 @@ def test_do_search_filters_min_confidence_without_changing_similarity(
 
     assert [item.key for item in items] == ["key-high"]
     client_instance.recall.assert_called_once_with(
-        agent_id="langgraph_-my_5fns",
+        agent_id="langgraph_my_5fns",
         query="test query",
         limit=store._MEMANTO_RECALL_CAP,
         type=None,
@@ -562,7 +599,7 @@ def test_do_search_accepts_string_tag_filter(mock_sdk_client):
     assert len(items) == 1
     assert items[0].key == "key2"
     client_instance.recall.assert_called_once_with(
-        agent_id="langgraph_-my_5fns",
+        agent_id="langgraph_my_5fns",
         query="test query",
         limit=10,
         type=None,

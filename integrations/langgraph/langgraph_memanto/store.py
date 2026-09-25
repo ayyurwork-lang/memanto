@@ -69,21 +69,20 @@ _DEFAULT_AGENT_PREFIX = "langgraph_"
 # Agent id used for the empty namespace ``()`` (historical name, kept so stores
 # created by earlier versions stay addressable).
 _EMPTY_NAMESPACE_ID = "default"
-# Every non-empty namespace is encoded with this marker first, which keeps the
-# encoded ids disjoint from both the historical flat ids and the empty one.
-_NAMESPACE_ESCAPE_MARKER = "-"
+# ``-`` separates components and ``_`` introduces an escape: every character
+# outside ``[A-Za-z0-9]`` is written as ``_`` + two hex digits per UTF-8 byte,
+# and an empty component is the single marker ``_``. Components therefore can
+# never contain a raw ``-``, which is what makes the mapping reversible -- and
+# reversibility is what keeps two namespaces from sharing one memory agent.
+_COMPONENT_SEPARATOR = "-"
+_EMPTY_COMPONENT = "_"
 _HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
 
 
 def _encode_component(component: str) -> str:
-    """Encode one namespace component so it never contains a raw ``-``.
-
-    Alphanumeric ASCII passes through; everything else (``_``, ``-``, spaces,
-    accented characters, ...) becomes ``_`` + two hex digits per UTF-8 byte.
-    The escaping is what makes the whole mapping reversible: any ``_`` in an
-    encoded component starts an escape, and ``-`` is reserved as the component
-    separator.
-    """
+    """Encode one namespace component so it never contains a raw ``-``."""
+    if not component:
+        return _EMPTY_COMPONENT
     encoded: list[str] = []
     for char in component:
         if char.isascii() and char.isalnum():
@@ -95,6 +94,8 @@ def _encode_component(component: str) -> str:
 
 def _decode_component(component: str) -> str | None:
     """Inverse of :func:`_encode_component`, or ``None`` when malformed."""
+    if component == _EMPTY_COMPONENT:
+        return ""
     raw = bytearray()
     index = 0
     while index < len(component):
@@ -127,24 +128,29 @@ def _namespace_to_agent_id(
 
     * ``()`` keeps the historical ``langgraph_default`` id;
     * a single alphanumeric component keeps its historical id (an all-alnum id
-      can never be produced by the encoded form below, which always contains
-      ``-`` or ``_``);
-    * everything else is encoded as ``-`` + escaped components joined by ``-``.
+      can never be produced by the encoded form, which always contains ``-`` or
+      ``_``);
+    * everything else is escaped components joined by ``-``.
+
+    The result never starts with ``-``: the first component begins with an
+    alphanumeric character, an escape (``_``) or the empty-component marker, so
+    the id cannot be mistaken for a command-line option.
     """
     if not namespace:
         return f"{prefix}{_EMPTY_NAMESPACE_ID}"
     if len(namespace) == 1:
         only = namespace[0]
-        if (
-            only.isascii()
-            and only.isalnum()
-            and only != _EMPTY_NAMESPACE_ID
-        ):
-            return f"{prefix}{only}"
-    joined = _NAMESPACE_ESCAPE_MARKER.join(
+        if only.isascii() and only.isalnum():
+            if only != _EMPTY_NAMESPACE_ID:
+                return f"{prefix}{only}"
+            # ``("default",)`` must not share an agent with the empty
+            # namespace, so the reserved id is escaped instead of passed
+            # through. Decoding it yields ``"default"`` again.
+            return f"{prefix}_{ord(only[0]):02x}{only[1:]}"
+    joined = _COMPONENT_SEPARATOR.join(
         _encode_component(component) for component in namespace
     )
-    return f"{prefix}{_NAMESPACE_ESCAPE_MARKER}{joined}"
+    return f"{prefix}{joined}"
 
 
 def _agent_id_to_namespace(
@@ -152,8 +158,8 @@ def _agent_id_to_namespace(
 ) -> tuple[str, ...] | None:
     """Inverse of :func:`_namespace_to_agent_id`; ``None`` when not ours.
 
-    Ids written by the previous lossy mapping (``langgraph_my_ns``) do not carry
-    the escape marker and are decoded the old way -- ``split("_\")`` -- so
+    Ids written by the previous lossy mapping (``langgraph_my_ns``) contain an
+    escape-free ``_`` and are decoded the old way -- ``split("_\")`` -- so
     namespaces created before this fix keep showing up in ``list_namespaces``.
     """
     if not agent_id.startswith(prefix):
@@ -161,16 +167,12 @@ def _agent_id_to_namespace(
     suffix = agent_id[len(prefix) :]
     if suffix == _EMPTY_NAMESPACE_ID:
         return ()
-    if suffix.startswith(_NAMESPACE_ESCAPE_MARKER):
-        encoded = suffix[len(_NAMESPACE_ESCAPE_MARKER) :]
-        components = [
-            _decode_component(part) for part in encoded.split(_NAMESPACE_ESCAPE_MARKER)
-        ]
-        if any(component is None for component in components):
-            return None
-        return tuple(components)  # type: ignore[arg-type]
-    # Legacy id from the previous, lossy mapping.
-    return tuple(suffix.split("_"))
+    components = suffix.split(_COMPONENT_SEPARATOR)
+    decoded = [_decode_component(part) for part in components]
+    if any(component is None for component in decoded):
+        # Legacy id from the previous, lossy mapping.
+        return tuple(suffix.split("_"))
+    return tuple(decoded)  # type: ignore[arg-type]
 
 _VALID_MEMORY_TYPES = {
     "fact",
